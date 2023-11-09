@@ -1,51 +1,99 @@
-extern crate tch;
-use tch::{nn, nn::Module, nn::OptimizerConfig, Device, vision};
+use tch::{nn, nn::Module, nn::OptimizerConfig, Tensor, Device, nn::VarStore, Kind};
+use mnist::*;
+use tqdm::tqdm;
 
-const BATCH_SIZE: i64 = 64;
-const VALIDATION_BATCH_SIZE: i64 = 1000;
-const EPOCHS: i64 = 10;
+// Function to load and preprocess the MNIST dataset.
+fn load_mnist_data() -> (Tensor, Tensor, Tensor, Tensor) {
+    let Mnist { trn_img, trn_lbl, tst_img, tst_lbl, .. } = MnistBuilder::new()
+        .label_format_digit()
+        .training_set_length(50_000)
+        .validation_set_length(10_000)
+        .test_set_length(10_000)
+        .finalize();
+    
+    let train_images_tensor = Tensor::of_slice(&trn_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
+    let train_labels_tensor = Tensor::of_slice(&trn_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
+    let test_images_tensor = Tensor::of_slice(&tst_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
+    let test_labels_tensor = Tensor::of_slice(&tst_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Set device to CPU or CUDA
-    let device = Device::cuda_if_available();
-    let vs = nn::VarStore::new(device);
+    (train_images_tensor, train_labels_tensor, test_images_tensor, test_labels_tensor)
+}
 
-    // Load the MNIST dataset
-    let mnist = vision::mnist::load_dir("data")?;
+// Function to create the neural network model.
+fn create_network(vs: &nn::Path) -> nn::Sequential {
+    let input_size = 784;
+    let hidden_size = 128;
+    let output_size = 10;
+    let cfg = nn::LinearConfig::default();
 
-    // Assuming that mnist has a method to provide training data loader directly
-    let (train_dl, validation_dl) = mnist.train_iter(BATCH_SIZE).split_with_ratio(0.8);
-
-    let net = nn::seq()
-        .add(nn::conv2d(vs.root(), 1, 32, 5, Default::default()))
-        .add_fn(|xs| xs.max_pool2d_default(2).relu())
-        .add(nn::conv2d(vs.root(), 32, 64, 5, Default::default()))
-        .add_fn(|xs| xs.max_pool2d_default(2).relu())
-        .add_fn(|xs| xs.view([-1, 64 * 4 * 4]))
-        .add(nn::linear(vs.root(), 64 * 4 * 4, 256, Default::default()))
+    nn::seq()
+        .add(nn::linear(vs / "layer1", input_size, hidden_size, cfg))
         .add_fn(|xs| xs.relu())
-        .add(nn::linear(vs.root(), 256, 10, Default::default()));
-    let mut opt = nn::Adam::default().build(&vs, 1e-3)?;
+        .add(nn::linear(vs / "layer2", hidden_size, output_size, cfg))
+}
 
-    for epoch in 1..=EPOCHS {
-        for (bimages, blabels) in train_dl.iter() {
-            let loss = net
-                .forward(&bimages)
-                .cross_entropy_for_logits(&blabels);
-            opt.backward_step(&loss);
-        }
-
-        // Validation loop
+// Function to run the training loop.
+fn train_network(net: &mut nn::Sequential, optimizer: &mut nn::Optimizer, train_images_tensor: &Tensor, train_labels_tensor: &Tensor, num_epochs: i32, batch_size: i64) {
+    let num_batches = train_images_tensor.size()[0] / batch_size;
+    let mut epoch_loss = 0.0;
+    for epoch in tqdm(1..=num_epochs) {
         let mut total_correct = 0;
         let mut total = 0;
-        for (bimages, blabels) in validation_dl.iter() {
-            let predictions = net.forward(&bimages).argmax(-1, false);
-            total_correct += predictions.eq1(&blabels).sum_int();
-            total += blabels.size()[0];
+        for batch_index in tqdm(0..num_batches) {
+            let batch = train_images_tensor.narrow(0, batch_index * batch_size, batch_size).view([-1, 28 * 28]);
+            let labels = train_labels_tensor.narrow(0, batch_index * batch_size, batch_size);
+            let predictions = net.forward(&batch);
+            let loss = predictions.cross_entropy_for_logits(&labels);
+            optimizer.zero_grad();
+            loss.backward();
+            optimizer.step();
+
+            total_correct += label_accuracy(&predictions, &labels) as i64;
+            total += batch_size;
+            epoch_loss = loss.double_value(&[]);
         }
-        let accuracy = total_correct as f64 / total as f64;
-        println!("Epoch: {}, Validation accuracy: {:.2}%", epoch, accuracy * 100.0);
+        println!("Epoch: {}, Loss: {}", epoch, epoch_loss);
+        println!("Train accuracy: {}", total_correct as f64 / total as f64)
+    }
+}
+
+// Function to evaluate the network on the test dataset.
+fn evaluate_network(net: &mut nn::Sequential, test_images_tensor: &Tensor, test_labels_tensor: &Tensor, test_batch_size: i64) -> f64 {
+    let num_test_batches = test_images_tensor.size()[0] / test_batch_size;
+    let mut total_correct = 0;
+    let mut total = 0;
+
+    for batch_index in tqdm(0..num_test_batches) {
+        let batch = test_images_tensor.narrow(0, batch_index * test_batch_size, test_batch_size).view([-1, 28 * 28]);
+        let labels = test_labels_tensor.narrow(0, batch_index * test_batch_size, test_batch_size);
+        let logits = net.forward(&batch);
+        // let predicted_labels = logits.argmax(-1, false);
+        // let correct_predictions = predicted_labels.eq_tensor(&labels);
+        // total_correct += correct_predictions.to_kind(Kind::Int64).sum(Kind::Int64).int64_value(&[]);
+        total_correct += label_accuracy(&logits, &labels) as i64;
+        total += test_batch_size;
     }
 
-    Ok(())
+    total_correct as f64 / total as f64
+}
+
+fn label_accuracy(predictions: &Tensor, labels: &Tensor) -> i64 {
+    let predicted_labels = predictions.argmax(-1, false);
+    let correct_predictions = predicted_labels.eq_tensor(&labels);
+
+    correct_predictions.to_kind(Kind::Int64).sum(Kind::Int64).int64_value(&[]) 
+}
+
+fn main() {
+    let device = Device::Cpu;
+    let vs = VarStore::new(device);
+    let (train_images_tensor, train_labels_tensor, test_images_tensor, test_labels_tensor) = load_mnist_data();
+    let mut net = create_network(&vs.root());
+    let mut optimizer = nn::Adam::default().build(&vs, 1e-3).unwrap();
+    let num_epochs = 10;
+    let batch_size = 64;
+
+    train_network(&mut net, &mut optimizer, &train_images_tensor, &train_labels_tensor, num_epochs, batch_size);
+    let test_accuracy = evaluate_network(&mut net, &test_images_tensor, &test_labels_tensor, batch_size);
+    println!("Test accuracy: {}", test_accuracy);
 }
