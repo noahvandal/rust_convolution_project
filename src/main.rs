@@ -1,6 +1,7 @@
 use tch::{nn, nn::Module, nn::OptimizerConfig, Tensor, Device, nn::VarStore, Kind};
 use mnist::*;
 use tqdm::tqdm;
+use std::time::Instant;
 
 // Function to load and preprocess the MNIST dataset.
 fn load_mnist_data() -> (Tensor, Tensor, Tensor, Tensor) {
@@ -11,20 +12,20 @@ fn load_mnist_data() -> (Tensor, Tensor, Tensor, Tensor) {
         .test_set_length(10_000)
         .finalize();
     
-    let train_images_tensor = Tensor::of_slice(&trn_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
-    let train_labels_tensor = Tensor::of_slice(&trn_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
-    let test_images_tensor = Tensor::of_slice(&tst_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
-    let test_labels_tensor = Tensor::of_slice(&tst_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
+    let train_images_tensor: Tensor = Tensor::of_slice(&trn_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
+    let train_labels_tensor: Tensor = Tensor::of_slice(&trn_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
+    let test_images_tensor: Tensor = Tensor::of_slice(&tst_img.into_iter().map(|x| x as f32 / 255.0).collect::<Vec<f32>>()).view([-1, 28, 28]);
+    let test_labels_tensor: Tensor = Tensor::of_slice(&tst_lbl.into_iter().map(|x| x as i64).collect::<Vec<i64>>());
 
     (train_images_tensor, train_labels_tensor, test_images_tensor, test_labels_tensor)
 }
 
 // Function to create the neural network model.
 fn create_network(vs: &nn::Path) -> nn::Sequential {
-    let input_size = 784;
-    let hidden_size = 128;
-    let output_size = 10;
-    let cfg = nn::LinearConfig::default();
+    let input_size: i64 = 784;
+    let hidden_size: i64 = 128;
+    let output_size: i64 = 10;
+    let cfg: nn::LinearConfig = nn::LinearConfig::default();
 
     nn::seq()
         .add(nn::linear(vs / "layer1", input_size, hidden_size, cfg))
@@ -93,7 +94,10 @@ fn main() {
     let num_epochs = 10;
     let batch_size = 64;
 
+    let start_time = Instant::now();
     train_network(&mut net, &mut optimizer, &train_images_tensor, &train_labels_tensor, num_epochs, batch_size);
+    let elapsed = start_time.elapsed();
+    println!("Training time: {:?}", elapsed);
     let test_accuracy = evaluate_network(&mut net, &test_images_tensor, &test_labels_tensor, batch_size);
     println!("Test accuracy: {}", test_accuracy);
 }
